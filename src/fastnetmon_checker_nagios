@@ -1,0 +1,16 @@
+#!/bin/sh
+
+PIDFILE=/var/run/fastnetmon.pid
+
+if [ ! -f $PIDFILE ] || [ "`pgrep -F $PIDFILE -c`" == 0 ]; then
+	# trigger restart 
+	
+	/etc/init.d/fastnetmon -D restart >/dev/null 2>&1
+	/etc/init.d/iptables -D restart >/dev/null 2>&1
+	echo "CRITICAL: fastnetmon is crashed, restarting"
+	exit 2
+elsif
+
+PID=$(cat $PIDFILE)
+echo "OK: fastnetmon is running $PID"
+exit 0
