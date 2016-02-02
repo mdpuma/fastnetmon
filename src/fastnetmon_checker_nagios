@@ -9,7 +9,7 @@ if [ ! -f $PIDFILE ] || [ "`pgrep -F $PIDFILE -c`" == 0 ]; then
 	/etc/init.d/iptables -D restart >/dev/null 2>&1
 	echo "CRITICAL: fastnetmon is crashed, restarting"
 	exit 2
-elsif
+fi
 
 PID=$(cat $PIDFILE)
 echo "OK: fastnetmon is running $PID"
