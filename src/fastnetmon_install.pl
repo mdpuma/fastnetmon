@@ -27,7 +27,7 @@ my $install_log_path = '/tmp/fastnetmon_install.log';
 # But we have some patches for NTP and DNS protocols here
 my $ndpi_repository = 'https://github.com/pavel-odintsov/nDPI.git';
 
-my $stable_branch_name = 'v1.1.2';
+my $stable_branch_name = 'v1.1.3';
 my $we_use_code_from_master = '';
 
 my $os_type = '';
@@ -67,24 +67,16 @@ GetOptions(
     'create-binary-bundle' => \$create_binary_bundle,
 );
 
-my $we_have_ndpi_support = '';
-my $we_have_luajit_support = '';
-my $we_have_hiredis_support = '';
-my $we_have_log4cpp_support = '';
+my $we_have_ndpi_support = '1';
+my $we_have_luajit_support = '1';
+my $we_have_hiredis_support = '1';
+my $we_have_log4cpp_support = '1';
 my $we_have_pfring_support = '';
-my $we_have_mongo_support = '';
+my $we_have_mongo_support = '1';
 my $we_have_protobuf_support = '';
 my $we_have_grpc_support = '';
 my $we_have_golang_support = '';
 my $we_have_gobgp_support = '';
-
-if ($we_use_code_from_master) {
-    $we_have_ndpi_support = 1;
-    $we_have_luajit_support = 1;
-    $we_have_hiredis_support = 1;
-    $we_have_log4cpp_support = 1;
-    $we_have_mongo_support = 1;
-}
 
 my $enable_gobgp_backend = '';
 
@@ -103,6 +95,7 @@ sub welcome_message {
     print "We need about ten minutes of your time for installing FastNetMon toolkit\n";
     print "You could make coffee/tee or you will help project and fill this short survey:   http://bit.ly/fastnetmon_survey\n";
     print "I would be very glad if you spent this time and shared your DDoS experience :)\n\n";
+    print "In case of any issues with install script please share file $install_log_path with developers\n";
 }
 
 sub get_logical_cpus_number {
@@ -203,9 +196,7 @@ sub main {
         install_pf_ring();
     }
 
-    if ($we_use_code_from_master) {
-        install_json_c();
-    }   
+    install_json_c();
 
     if ($we_have_ndpi_support) {
         install_ndpi();
@@ -1245,14 +1236,25 @@ sub install_pf_ring {
             }
         }
     } elsif ($distro_type eq 'centos') {
+        my @centos_dependency_packages = ('make', 'bison', 'flex', 'gcc', 'gcc-c++', 'dkms', 'numactl-devel', 'subversion');
+
+        # This package is not going to install devel headers for current kernel!
         my $kernel_package_name = 'kernel-devel';
 
         # Fix deplist for OpenVZ
         if ($kernel_version =~ /stab/) {
             $kernel_package_name = "vzkernel-devel-$kernel_version";
         }
-    
-        yum('make', 'bison', 'flex', $kernel_package_name, 'gcc', 'gcc-c++', 'dkms', 'numactl-devel', 'subversion');
+
+        push @centos_dependency_packages, $kernel_package_name;
+  
+        my $centos_kernel_version = `uname -r`;
+        chomp $centos_kernel_version;
+ 
+        # But this package will install kernel devel headers for current kernel version!
+        push @centos_dependency_packages, "$kernel_package_name-$centos_kernel_version";
+
+        yum(@centos_dependency_packages);
     } elsif ($distro_type eq 'gentoo') {
         my @gentoo_packages_for_pfring = ('subversion', 'sys-process/numactl', 'wget', 'tar');
 
@@ -1378,15 +1380,6 @@ sub install_fastnetmon {
         # Do not install Boost when we build it manually
         unless ($build_binary_environment) {
             @fastnetmon_deps = (@fastnetmon_deps, 'boost-devel', 'boost-thread')
-        }
-
-        if ($distro_version == 7) {
-            print "Your distro haven't log4cpp in stable EPEL packages and we install log4cpp from testing of EPEL\n";
-            # We should install log4cpp packages only in this order!
-            yum('https://kojipkgs.fedoraproject.org//packages/log4cpp/1.1.1/1.el7/x86_64/log4cpp-1.1.1-1.el7.x86_64.rpm',
-                'https://kojipkgs.fedoraproject.org//packages/log4cpp/1.1.1/1.el7/x86_64/log4cpp-devel-1.1.1-1.el7.x86_64.rpm'),
-        } else {
-            push @fastnetmon_deps, 'log4cpp-devel';
         }
 
         yum(@fastnetmon_deps);

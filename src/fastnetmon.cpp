@@ -137,8 +137,6 @@ time_t last_call_of_traffic_recalculation;
 
 std::string cli_stats_file_path = "/tmp/fastnetmon.dat";
 
-std::string reporting_server = "heartbeat.fastnetmon.io";
-
 unsigned int stats_thread_sleep_time = 3600;
 unsigned int stats_thread_initial_call_delay = 30;
 
@@ -430,7 +428,6 @@ void init_current_instance_of_ndpi();
 inline void build_average_speed_counters_from_speed_counters( map_element* current_average_speed_element, map_element& new_speed_element, double exp_value, double exp_power);
 inline void build_speed_counters_from_packet_counters(map_element& new_speed_element, map_element* vector_itr, double speed_calc_period);
 void execute_ip_ban(uint32_t client_ip, map_element average_speed_element, std::string flow_attack_details, subnet_t customer_subnet);
-void collect_stats();
 std::string get_attack_description_in_json(uint32_t client_ip, attack_details& current_attack);
 logging_configuration_t read_logging_settings(configuration_map_t configuration_map);
 std::string get_amplification_attack_type(amplification_attack_type_t attack_type);
@@ -545,7 +542,7 @@ class FastnetmonApiServiceImpl final : public Fastnetmon::Service {
 FastnetmonApiServiceImpl api_service;
 
 std::unique_ptr<Server> StartupApiServer() {
-    std::string server_address("0.0.0.0:50051");
+    std::string server_address("127.0.0.1:50052");
     ServerBuilder builder;
     // Listen on the given address without any authentication mechanism.
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
@@ -2059,15 +2056,19 @@ void recalculate_speed_thread_handler() {
 }
 
 // Get ban settings for this subnet or return global ban settings
-ban_settings_t get_ban_settings_for_this_subnet(subnet_t subnet) {
+ban_settings_t get_ban_settings_for_this_subnet(subnet_t subnet, std::string& host_group_name) {
     // Try to find host group for this subnet
     subnet_to_host_group_map_t::iterator host_group_itr = subnet_to_host_groups.find( subnet );
 
     if (host_group_itr == subnet_to_host_groups.end()) {
         // We haven't host groups for all subnets, it's OK
+        // logger << log4cpp::Priority::INFO << "We haven't custom host groups for this network. We will use global ban settings";
+        host_group_name = "global";
         return global_ban_settings;
     }
-   
+  
+    host_group_name = host_group_itr->second;
+ 
     // We found host group for this subnet
     host_group_ban_settings_map_t::iterator hostgroup_settings_itr = 
         host_group_ban_settings_map.find(host_group_itr->second);
@@ -2227,9 +2228,12 @@ void recalculate_speed() {
             }
 
             /* Moving average recalculation end */
-            ban_settings_t current_ban_settings = get_ban_settings_for_this_subnet( itr->first );
+            std::string host_group_name;
+            ban_settings_t current_ban_settings = get_ban_settings_for_this_subnet(itr->first, host_group_name);
 
             if (we_should_ban_this_ip(current_average_speed_element, current_ban_settings)) {
+                logger << log4cpp::Priority::INFO << "We have found host group for this host as: " << host_group_name;  
+
                 std::string flow_attack_details = "";
 
                 if (enable_conection_tracking) {
@@ -2324,7 +2328,7 @@ void traffic_draw_programm() {
     }
 
     output_buffer << "FastNetMon " << fastnetmon_version
-                  << " FastVPS Eesti OU (c) VPS and dedicated: http://FastVPS.host"
+                  << " Pavel Odintsov: stableit.ru"
                   << "\n"
                   << "IPs ordered by: " << sort_parameter << "\n";
 
@@ -2781,9 +2785,6 @@ int main(int argc, char** argv) {
         service_thread_group.add_thread(new boost::thread(cleanup_ban_list));
     }
 
-    // Run stats thread
-    service_thread_group.add_thread(new boost::thread(collect_stats));
-
 #ifdef PF_RING
     if (enable_data_collection_from_mirror) {
         packet_capture_plugin_thread_group.add_thread(new boost::thread(start_pfring_collection, process_packet));
@@ -2924,7 +2925,7 @@ void exabgp_prefix_ban_manage(std::string action, std::string prefix_as_string_w
         sprintf(bgp_message, "announce route %s next-hop %s community %s\n",
             prefix_as_string_with_mask.c_str(), exabgp_next_hop.c_str(), exabgp_community.c_str());
     } else {
-        sprintf(bgp_message, "withdraw route %s\n", prefix_as_string_with_mask.c_str());
+        sprintf(bgp_message, "withdraw route %s next-hop %s\n", prefix_as_string_with_mask.c_str(), exabgp_next_hop.c_str());
     }    
 
     logger << log4cpp::Priority::INFO << "ExaBGP announce message: " << bgp_message;
@@ -3253,37 +3254,6 @@ void call_ban_handlers(uint32_t client_ip, attack_details& current_attack, std::
 #endif
 }
 
-void send_usage_data_to_reporting_server() {
-    std::stringstream request_stream;
-    request_stream << "GET " << "/heartbeat/stats?incoming_traffic_speed=" << total_speed_average_counters[INCOMING].bytes;
-    request_stream << "&outgoing_traffic_speed=" << total_speed_average_counters[OUTGOING].bytes;
-    request_stream << " HTTP/1.0\r\n";
-    request_stream << "Host: " << reporting_server << "\r\n";
-    request_stream << "Accept: */*\r\n";
-    request_stream << "Connection: close\r\n\r\n";
-
-    std::string reporting_server_ip_address = dns_lookup(reporting_server);
-
-    if (reporting_server_ip_address.empty()) {
-        logger << log4cpp::Priority::ERROR << "Stats server resolver failed, please check your DNS";
-        return;
-    }
-
-    bool result = store_data_to_stats_server(80, reporting_server_ip_address, request_stream.str());
-
-    if (!result) {
-        logger << log4cpp::Priority::ERROR << "Can't collect stats data";
-    }
-}
-
-void collect_stats() {
-    boost::this_thread::sleep(boost::posix_time::seconds(stats_thread_initial_call_delay));
-
-    while (true) {
-        send_usage_data_to_reporting_server(); 
-        boost::this_thread::sleep(boost::posix_time::seconds(stats_thread_sleep_time));
-    }
-}
 
 /* Thread for cleaning up ban list */
 void cleanup_ban_list() {
@@ -3349,7 +3319,8 @@ void cleanup_ban_list() {
                 map_element* average_speed_element = &itr_average_speed->second[shift_in_vector];  
 
                 // We get ban settings from host subnet
-                ban_settings_t current_ban_settings = get_ban_settings_for_this_subnet( itr->second.customer_network );
+                std::string host_group_name;
+                ban_settings_t current_ban_settings = get_ban_settings_for_this_subnet(itr->second.customer_network, host_group_name);
 
                 if (we_should_ban_this_ip(average_speed_element, current_ban_settings)) {
                     logger << log4cpp::Priority::ERROR << "Attack to IP " << client_ip_as_string
@@ -3581,6 +3552,48 @@ void init_current_instance_of_ndpi() {
     ndpi_size_flow_struct = ndpi_detection_get_sizeof_ndpi_flow_struct(); 
 }
 
+// Zeroify nDPI structure without memory leaks
+void zeroify_ndpi_flow(struct ndpi_flow_struct* flow) {
+    if (flow->http.url) {
+        ndpi_free(flow->http.url);
+    }
+
+    if (flow->http.content_type) {
+        ndpi_free(flow->http.content_type);
+    }
+
+    memset(flow, 0, ndpi_size_flow_struct);
+}
+
+// Run flow spec mitigation rule
+void launch_bgp_flow_spec_rule(amplification_attack_type_t attack_type, std::string client_ip_as_string) {
+    logger << log4cpp::Priority::INFO << "We detected this attack as: " << get_amplification_attack_type(attack_type);
+
+    std::string flow_spec_rule_text = generate_flow_spec_for_amplification_attack(attack_type, client_ip_as_string);
+
+    logger << log4cpp::Priority::INFO << "We have generated BGP Flow Spec rule for this attack: " << flow_spec_rule_text;
+
+    if (exabgp_flow_spec_announces) {
+        active_flow_spec_announces_t::iterator itr = active_flow_spec_announces.find(flow_spec_rule_text);
+
+        if (itr == active_flow_spec_announces.end()) {
+            // We havent this flow spec rule active yet
+
+            logger << log4cpp::Priority::INFO << "We will publish flow spec announce about this attack";
+            bool exabgp_publish_result = exabgp_flow_spec_ban_manage("ban", flow_spec_rule_text);
+
+            if (exabgp_publish_result) {
+                active_flow_spec_announces[ flow_spec_rule_text ] = 1;
+            }
+        } else {
+            // We have already blocked this attack
+            logger << log4cpp::Priority::INFO << "The same rule was already sent to ExaBGP formerly";
+        }
+    } else {
+          logger << log4cpp::Priority::INFO << "exabgp_flow_spec_announces disabled. We will not talk to ExaBGP";
+    }
+}
+
 // Not so pretty copy and paste from pcap_reader()
 // TODO: rewrite to memory parser
 void produce_dpi_dump_for_pcap_dump(std::string pcap_file_path, std::stringstream& ss, std::string client_ip_as_string) {
@@ -3617,12 +3630,25 @@ void produce_dpi_dump_for_pcap_dump(std::string pcap_file_path, std::stringstrea
     uint64_t ssdp_amplification_packets = 0;
     uint64_t snmp_amplification_packets = 0;
 
+
+    struct ndpi_id_struct *src = (struct ndpi_id_struct*)malloc(ndpi_size_id_struct);
+    memset(src, 0, ndpi_size_id_struct);
+
+    struct ndpi_id_struct* dst = (struct ndpi_id_struct*)malloc(ndpi_size_id_struct);
+    memset(dst, 0, ndpi_size_id_struct);
+
+    struct ndpi_flow_struct* flow = (struct ndpi_flow_struct*)malloc(ndpi_size_flow_struct); 
+    memset(flow, 0, ndpi_size_flow_struct);
+
     while (1) {
         struct fastnetmon_pcap_pkthdr pcap_packet_header;
         ssize_t packet_header_readed_bytes =
         read(filedesc, &pcap_packet_header, sizeof(struct fastnetmon_pcap_pkthdr));
 
         if (packet_header_readed_bytes != sizeof(struct fastnetmon_pcap_pkthdr)) {
+            if (packet_header_readed_bytes != 0) {
+                logger << log4cpp::Priority::INFO << "All packet read ? (" << packet_header_readed_bytes << ", " << errno << ")";
+            }
             // We haven't any packets
             break;
         }
@@ -3639,18 +3665,10 @@ void produce_dpi_dump_for_pcap_dump(std::string pcap_file_path, std::stringstrea
             return;
         }
 
-        struct ndpi_id_struct *src = NULL;
-        struct ndpi_id_struct *dst = NULL;
-        struct ndpi_flow_struct *flow = NULL;
-
-        src = (struct ndpi_id_struct*)malloc(ndpi_size_id_struct);
-        memset(src, 0, ndpi_size_id_struct);
-
-        dst = (struct ndpi_id_struct*)malloc(ndpi_size_id_struct);
-        memset(dst, 0, ndpi_size_id_struct);
-
-        flow = (struct ndpi_flow_struct *)malloc(ndpi_size_flow_struct); 
-        memset(flow, 0, ndpi_size_flow_struct);
+        // The flow must be reset to zero state - in other case the DPI will not detect all packets properly.
+        // To use flow properly there must be much more complicated code (with flow buffer for each flow probably)
+        // following code is copied from ndpi_free_flow() just to be sure there will be no memory leaks due to memset()
+        zeroify_ndpi_flow(flow);
 
         std::string parsed_packet_as_string;
 
@@ -3680,57 +3698,44 @@ void produce_dpi_dump_for_pcap_dump(std::string pcap_file_path, std::stringstrea
 
         ss << parsed_packet_as_string << " protocol: " << protocol_name << " master_protocol: " << master_protocol_name << "\n";
 
-        // Free up all memory
-        ndpi_free_flow(flow);
-        free(dst);
-        free(src);
-        
-        close(filedesc);
-
         total_packets_number++;
     }
 
+    // Free up all memory
+    ndpi_free_flow(flow);
+    free(dst);
+    free(src);
+    
+    close(filedesc);
+
+    logger << log4cpp::Priority::INFO 
+           << "DPI pkt stats: total:"  << total_packets_number
+                           << " DNS:"  << dns_amplification_packets
+                           << " NTP:"  << ntp_amplification_packets
+                           << " SSDP:" << ssdp_amplification_packets
+                           << " SNMP:" << snmp_amplification_packets;
+                                       
     amplification_attack_type_t attack_type;
 
     // Attack type in unknown by default
     attack_type = AMPLIFICATION_ATTACK_UNKNOWN;
 
     // Detect amplification attack type
-    if ( (double)dns_amplification_packets / (double)total_packets_number > 0.5) {
-        attack_type = AMPLIFICATION_ATTACK_DNS;
-    } else if ( (double)ntp_amplification_packets / (double)total_packets_number > 0.5) {
-        attack_type = AMPLIFICATION_ATTACK_NTP;
-    } else if ( (double)ssdp_amplification_packets / (double)total_packets_number > 0.5) {
-        attack_type = AMPLIFICATION_ATTACK_SSDP;
-    } else if ( (double)snmp_amplification_packets / (double)total_packets_number > 0.5) {
-        attack_type = AMPLIFICATION_ATTACK_SNMP;
-    }
-
-    if (attack_type == AMPLIFICATION_ATTACK_UNKNOWN) {
-        logger << log4cpp::Priority::ERROR << "We can't detect attack type with DPI it's not so criticial, only for your information";
+    if ( (double)dns_amplification_packets / (double)total_packets_number > 0.2) {
+        launch_bgp_flow_spec_rule(AMPLIFICATION_ATTACK_DNS, client_ip_as_string);
+    } else if ( (double)ntp_amplification_packets / (double)total_packets_number > 0.2) {
+        launch_bgp_flow_spec_rule(AMPLIFICATION_ATTACK_NTP, client_ip_as_string);
+    } else if ( (double)ssdp_amplification_packets / (double)total_packets_number > 0.2) {
+        launch_bgp_flow_spec_rule(AMPLIFICATION_ATTACK_SSDP, client_ip_as_string);
+    } else if ( (double)snmp_amplification_packets / (double)total_packets_number > 0.2) {
+        launch_bgp_flow_spec_rule(AMPLIFICATION_ATTACK_SNMP, client_ip_as_string);
     } else {
-        logger << log4cpp::Priority::INFO << "We detected this attack as: " << get_amplification_attack_type(attack_type);
-    
-        std::string flow_spec_rule_text = generate_flow_spec_for_amplification_attack(attack_type, client_ip_as_string);
+        /*TODO 
+            - full IP ban should be announced here !        
+            - and maybe some protocol/port based statistics could be used to filter new/unknown attacks...
+        */
 
-        logger << log4cpp::Priority::INFO << "We have generated BGP Flow Spec rule for this attack: " << flow_spec_rule_text;
-
-        if (exabgp_flow_spec_announces) {
-            active_flow_spec_announces_t::iterator itr = active_flow_spec_announces.find(flow_spec_rule_text);
-
-            if (itr == active_flow_spec_announces.end()) {
-                // We havent this flow spec rule active yet
-
-                logger << log4cpp::Priority::INFO << "We will publish flow spec announce about this attack";
-                bool exabgp_publish_result = exabgp_flow_spec_ban_manage("ban", flow_spec_rule_text);
-
-                if (exabgp_publish_result) {
-                    active_flow_spec_announces[ flow_spec_rule_text ] = 1;
-                }
-            } else {
-                // We have already blocked this attack
-            }
-        }
+        logger << log4cpp::Priority::ERROR << "We can't detect attack type with DPI it's not so criticial, only for your information";
     }
 }
 
